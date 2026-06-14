@@ -1,4 +1,4 @@
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { defineStore } from 'pinia'
 import type { Document, OCRResult, Annotation } from '../types'
 
@@ -8,6 +8,87 @@ export const useOcrStore = defineStore('ocr', () => {
   const isLoading = ref(false)
   const searchQuery = ref('')
   const searchResults = ref<OCRResult[]>([])
+  const collapsedParagraphs = ref<Set<number>>(new Set())
+  const DEFAULT_COLLAPSE_THRESHOLD = 2
+
+  function autoCollapseOnLoad() {
+    if (!currentDoc.value) return
+    const groupCount = paragraphGroups.value.size
+    if (groupCount >= DEFAULT_COLLAPSE_THRESHOLD) {
+      collapsedParagraphs.value = new Set([...paragraphGroups.value.keys()])
+    } else {
+      collapsedParagraphs.value = new Set()
+    }
+  }
+
+  function getParagraphStats(items: OCRResult[]) {
+    const lowConfCount = items.filter(r => r.confidence < 0.9).length
+    const correctedCount = items.filter(r => r.corrected && r.corrected.trim()).length
+    return { lowConfCount, correctedCount, total: items.length }
+  }
+
+  const PARAGRAPTH_X_THRESHOLD = 100
+
+  function groupResultsByParagraph(results: OCRResult[]): Map<number, OCRResult[]> {
+    const groups = new Map<number, OCRResult[]>()
+    for (const r of results) {
+      const p = r.paragraph ?? 0
+      if (!groups.has(p)) groups.set(p, [])
+      groups.get(p)!.push(r)
+    }
+    return groups
+  }
+
+  const paragraphGroups = computed(() => {
+    if (!currentDoc.value) return new Map<number, OCRResult[]>()
+    const results = currentDoc.value.results
+    if (!results.length) return new Map<number, OCRResult[]>()
+
+    const needsAutoGroup = results.some(r => r.paragraph === undefined)
+    if (needsAutoGroup) {
+      const sorted = [...results].sort((a, b) => a.bbox[0] - b.bbox[0] || a.bbox[1] - b.bbox[1])
+      let currentParagraph = 0
+      let lastX = sorted[0].bbox[0]
+      const grouped = new Map<number, OCRResult[]>()
+
+      for (const r of sorted) {
+        if (Math.abs(r.bbox[0] - lastX) > PARAGRAPTH_X_THRESHOLD) {
+          currentParagraph++
+        }
+        lastX = r.bbox[0]
+        r.paragraph = currentParagraph
+        if (!grouped.has(currentParagraph)) grouped.set(currentParagraph, [])
+        grouped.get(currentParagraph)!.push(r)
+      }
+
+      for (const items of grouped.values()) {
+        items.sort((a, b) => a.bbox[1] - b.bbox[1])
+      }
+
+      return grouped
+    }
+
+    return groupResultsByParagraph(results)
+  })
+
+  function toggleParagraph(p: number) {
+    if (collapsedParagraphs.value.has(p)) {
+      collapsedParagraphs.value.delete(p)
+    } else {
+      collapsedParagraphs.value.add(p)
+    }
+    collapsedParagraphs.value = new Set(collapsedParagraphs.value)
+  }
+
+  function expandAll() {
+    collapsedParagraphs.value = new Set()
+  }
+
+  function collapseAll() {
+    if (!currentDoc.value) return
+    const keys = [...paragraphGroups.value.keys()]
+    collapsedParagraphs.value = new Set(keys)
+  }
 
   // Mock data
   const MOCK_DOC: Document = {
@@ -15,13 +96,13 @@ export const useOcrStore = defineStore('ocr', () => {
     name: '论语·学而篇',
     imageUrl: '',
     results: [
-      { id: 'r1', text: '子曰', bbox: [50, 30, 80, 40], confidence: 0.95 },
-      { id: 'r2', text: '学而', bbox: [50, 80, 80, 40], confidence: 0.88 },
-      { id: 'r3', text: '时习之', bbox: [50, 130, 120, 40], confidence: 0.91 },
-      { id: 'r4', text: '不亦说乎', bbox: [50, 180, 160, 40], confidence: 0.87 },
-      { id: 'r5', text: '有朋', bbox: [200, 30, 80, 40], confidence: 0.93 },
-      { id: 'r6', text: '自远方来', bbox: [200, 80, 160, 40], confidence: 0.85 },
-      { id: 'r7', text: '不亦乐乎', bbox: [200, 130, 160, 40], confidence: 0.92 },
+      { id: 'r1', text: '子曰', bbox: [50, 30, 80, 40], confidence: 0.95, paragraph: 0 },
+      { id: 'r2', text: '学而', bbox: [50, 80, 80, 40], confidence: 0.88, paragraph: 0 },
+      { id: 'r3', text: '时习之', bbox: [50, 130, 120, 40], confidence: 0.91, paragraph: 0 },
+      { id: 'r4', text: '不亦说乎', bbox: [50, 180, 160, 40], confidence: 0.87, paragraph: 0 },
+      { id: 'r5', text: '有朋', bbox: [200, 30, 80, 40], confidence: 0.93, paragraph: 1 },
+      { id: 'r6', text: '自远方来', bbox: [200, 80, 160, 40], confidence: 0.85, paragraph: 1 },
+      { id: 'r7', text: '不亦乐乎', bbox: [200, 130, 160, 40], confidence: 0.92, paragraph: 1 },
     ],
     annotations: [],
     createdAt: '2025-01-15'
@@ -36,6 +117,7 @@ export const useOcrStore = defineStore('ocr', () => {
   function loadMockDocument() {
     documents.value = [MOCK_DOC]
     currentDoc.value = MOCK_DOC
+    autoCollapseOnLoad()
   }
 
   async function uploadAndOCR(file: File) {
@@ -56,6 +138,7 @@ export const useOcrStore = defineStore('ocr', () => {
         }
         documents.value.push(doc)
         currentDoc.value = doc
+        autoCollapseOnLoad()
       }
     } catch {
       // Use mock data as fallback
@@ -104,7 +187,9 @@ export const useOcrStore = defineStore('ocr', () => {
 
   return {
     documents, currentDoc, isLoading, searchQuery, searchResults,
+    collapsedParagraphs, paragraphGroups,
     loadMockDocument, uploadAndOCR, addAnnotation, removeAnnotation,
-    convertVariant, searchInDocuments, exportTEI
+    convertVariant, searchInDocuments, exportTEI,
+    toggleParagraph, expandAll, collapseAll, getParagraphStats
   }
 })

@@ -1,9 +1,10 @@
 export interface OCRResult {
   id: string
   text: string
-  bbox: [number, number, number, number]  // x, y, w, h
+  bbox: [number, number, number, number]
   confidence: number
   corrected?: string
+  paragraph?: number
 }
 
 export interface Document {
